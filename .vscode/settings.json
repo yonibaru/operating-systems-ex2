@@ -1,6 +1,7 @@
 {
     "C_Cpp.errorSquiggles": "disabled",
     "files.associations": {
-        "in.h": "c"
+        "in.h": "c",
+        "signal.h": "c"
     }
 }

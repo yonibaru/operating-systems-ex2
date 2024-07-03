@@ -11,6 +11,7 @@
 #include <sys/select.h>
 #include <errno.h>
 #include <signal.h>
+#include <sys/un.h>
 
 #define BUFFER_SIZE 1024
 
@@ -19,15 +20,20 @@ void handle_alarm(int sig){
     exit(EXIT_SUCCESS);
 }
 
+void extractTypeAndPath(const char *input, char *type, char *path) {
+    strncpy(type, input, 5);
+    type[5] = '\0'; // Ensure type string is null-terminated
+    strcpy(path, input + 5);
+}
+
 void extractTypeAndPort(const char *input, char *type, int *port) {
     strncpy(type, input, 4);
     type[4] = '\0'; // Ensure type string is null-terminated
-
     *port = atoi(input + 4);
 }
 
 //Server functions
-void create_tcp_server(int e_param, char mode_param,int portno,int parent_to_child_pipe,int child_to_parent_pipe,int frwrd_fd,char *frwrd_type,struct sockaddr_in *udp_frwrd_addr){
+void create_tcp_server(int e_param, char mode_param,int portno,int parent_to_child_pipe,int child_to_parent_pipe,int frwrd_fd,char *frwrd_type,struct sockaddr_in *udp_frwrd_addr,struct sockaddr_un *uds_frwrd_addr){
     if(mode_param == 'o' && frwrd_fd == -1){
         printf("Error setting up client.\n");
         exit(EXIT_FAILURE);
@@ -38,6 +44,8 @@ void create_tcp_server(int e_param, char mode_param,int portno,int parent_to_chi
     char process_buffer[BUFFER_SIZE];
     struct sockaddr_in serv_addr, cli_addr;
     socklen_t udp_frwrd_addr_len = sizeof(*udp_frwrd_addr);
+    socklen_t uds_frwrd_addr_len = sizeof(*uds_frwrd_addr);
+
     ssize_t bytes_read;
     int n;
     int reuseaddr = 1;
@@ -150,6 +158,10 @@ void create_tcp_server(int e_param, char mode_param,int portno,int parent_to_chi
                                 send(frwrd_fd,process_buffer,sizeof(process_buffer) - 1,0);
                             }else if(strcmp(frwrd_type,"UDPC") == 0){
                                 sendto(frwrd_fd, process_buffer, sizeof(process_buffer) -1, 0, (struct sockaddr *)udp_frwrd_addr, udp_frwrd_addr_len);
+                            }else if(strcmp(frwrd_type,"UDSCD") == 0){
+                                sendto(frwrd_fd, process_buffer, sizeof(process_buffer) -1, 0, (struct sockaddr *)uds_frwrd_addr, uds_frwrd_addr_len);
+                            }else if(strcmp(frwrd_type,"UDSCS") == 0){
+                                send(frwrd_fd,process_buffer,strlen(process_buffer),0);
                             }
                         }
                     }
@@ -171,7 +183,7 @@ void create_tcp_server(int e_param, char mode_param,int portno,int parent_to_chi
     }
 }
 
-void create_udp_server(int e_param, char mode_param, int portno, int parent_to_child_pipe,int child_to_parent_pipe,int frwrd_fd,char *frwrd_type,struct sockaddr_in *udp_frwrd_addr,int timeout_count){
+void create_udp_server(int e_param, char mode_param, int portno, int parent_to_child_pipe,int child_to_parent_pipe,int frwrd_fd,char *frwrd_type,struct sockaddr_in *udp_frwrd_addr,int timeout_count,struct sockaddr_un *uds_frwrd_addr){
     if(mode_param == 'o' && frwrd_fd == -1){
         printf("Error setting up client.\n");
         exit(EXIT_FAILURE);
@@ -184,6 +196,7 @@ void create_udp_server(int e_param, char mode_param, int portno, int parent_to_c
     char process_buffer[BUFFER_SIZE];
     fd_set readfds;
     ssize_t bytes_read,recv_len;
+    socklen_t uds_frwrd_addr_len = sizeof(*uds_frwrd_addr);
 
     sock_fd = socket(AF_INET,SOCK_DGRAM,0);
     if(sock_fd < 0){
@@ -269,14 +282,15 @@ void create_udp_server(int e_param, char mode_param, int portno, int parent_to_c
                         printf("Child process responds to UDP Client: %s\n",process_buffer);
                     }else if(mode_param == 'o'){
                         //Output goes to ip add argument
-                        //If frwrd client is TCP...
-                        if(strcmp(frwrd_type,"TCPC") == 0){
-                            send(frwrd_fd,process_buffer,sizeof(process_buffer) - 1,0);
-                        }else if(strcmp(frwrd_type,"UDPC") == 0){
-                            if (sendto(frwrd_fd, process_buffer, strlen(process_buffer), 0, (struct sockaddr *)udp_frwrd_addr, udp_frwrd_addr_len) < 0) {
-                                perror("Error in UDP sendto");
+                          if(strcmp(frwrd_type,"TCPC") == 0){
+                                send(frwrd_fd,process_buffer,sizeof(process_buffer) - 1,0);
+                            }else if(strcmp(frwrd_type,"UDPC") == 0){
+                                sendto(frwrd_fd, process_buffer, sizeof(process_buffer) -1, 0, (struct sockaddr *)udp_frwrd_addr, udp_frwrd_addr_len);
+                            }else if(strcmp(frwrd_type,"UDSCD") == 0){
+                                sendto(frwrd_fd, process_buffer, sizeof(process_buffer) -1, 0, (struct sockaddr *)uds_frwrd_addr, uds_frwrd_addr_len);
+                            }else if(strcmp(frwrd_type,"UDSCS") == 0){
+                                send(frwrd_fd,process_buffer,strlen(process_buffer),0);
                             }
-                        }
                     }
                 }
                 // Reset buffer
@@ -293,12 +307,299 @@ void create_udp_server(int e_param, char mode_param, int portno, int parent_to_c
     }
 }
 
-void create_uds_datagram_server(){
+//UDSSD
+void create_uds_datagram_server(int e_param, char mode_param,int parent_to_child_pipe,int child_to_parent_pipe,int frwrd_fd,char *frwrd_type,struct sockaddr_in *udp_frwrd_addr,char *socket_path,struct sockaddr_un *uds_frwrd_addr){
+    if((mode_param == 'o' && frwrd_fd == -1) || mode_param == 'b'){
+        printf("Error setting up client.\n");
+        exit(EXIT_FAILURE);
+    }
+    int sock_fd,max_fd;
+    struct sockaddr_un server_addr, client_addr;
+    char socket_buffer[BUFFER_SIZE];
+    char process_buffer[BUFFER_SIZE];
+    socklen_t client_addr_len = sizeof(struct sockaddr_un);
+    socklen_t udp_frwrd_addr_len = sizeof(*udp_frwrd_addr);
+    fd_set readfds;
+    ssize_t bytes_read,recv_len;
+    socklen_t uds_frwrd_addr_len = sizeof(*uds_frwrd_addr);
 
+    if ((sock_fd = socket(AF_UNIX, SOCK_DGRAM, 0)) == -1) {
+        perror("socket");
+        exit(EXIT_FAILURE);
+    }
+
+
+    memset(&server_addr, 0, sizeof(struct sockaddr_un));
+    server_addr.sun_family = AF_UNIX;
+    strncpy(server_addr.sun_path, socket_path, sizeof(server_addr.sun_path) - 1);
+
+
+    // Bind socket to the path
+    if (bind(sock_fd, (struct sockaddr *) &server_addr, sizeof(struct sockaddr_un)) == -1) {
+        perror("bind");
+        close(sock_fd);
+        exit(EXIT_FAILURE);
+    }
+    printf("Started a UNIX Domain socket datagram server at given path...\n");
+
+    while(1){
+        FD_ZERO(&readfds); //Clear fds to prepare for reading
+        FD_SET(STDIN_FILENO, &readfds); //Add STDIN to the set
+        FD_SET(sock_fd, &readfds); // Add client fd to the set 
+        max_fd = sock_fd > STDIN_FILENO ? (sock_fd + 1) : (STDIN_FILENO + 1); // Determine the maximum of fds (select needs to know this?)
+
+        // select() waits for any fd activity  
+        if (select(max_fd, &readfds, NULL, NULL, NULL) < 0 && (errno != EINTR)) {
+            perror("Error on select");
+            close(sock_fd);
+            if(mode_param == 'o'){
+                close(frwrd_fd);
+            }
+            exit(EXIT_FAILURE);
+        }
+
+        
+        if(!e_param){ // Do if the parameter -e is missing:
+            // Check if something happened on stdin
+            if (FD_ISSET(STDIN_FILENO, &readfds)) {
+                memset(socket_buffer, 0, BUFFER_SIZE);
+                if (read(STDIN_FILENO, socket_buffer, BUFFER_SIZE) > 0) {
+                    if (strncmp(socket_buffer, "close", 5) == 0) {
+                        if(mode_param == 'o'){
+                            close(frwrd_fd);
+                        }
+                        close(sock_fd);
+                        unlink(socket_path);
+                        close(parent_to_child_pipe);
+                        close(child_to_parent_pipe);
+                        printf("Closing server.\n");
+                        exit(EXIT_SUCCESS);
+                    }
+                    write(parent_to_child_pipe, socket_buffer, strlen(socket_buffer)); // Send stdin input to child
+                    memset(process_buffer, 0, BUFFER_SIZE); 
+                    bytes_read = read(child_to_parent_pipe, process_buffer, sizeof(process_buffer) - 1);
+                    if (bytes_read > 0) {
+                        process_buffer[bytes_read] = '\0'; // Null-terminate the string
+                        printf("Child process responding to STDIN: %s\n",process_buffer); //Output goes to STDOUT
+                    }
+                    // Reset buffer
+                    memset(process_buffer, 0, BUFFER_SIZE); 
+                }
+            }
+        }
+    
+        // Check if something happened on client_fd
+        if(FD_ISSET(sock_fd, &readfds)){
+            memset(socket_buffer, 0, BUFFER_SIZE);
+            // Continuously read each chunk of data from socket INTO the buffer
+            if ((recv_len = recvfrom(sock_fd, socket_buffer, BUFFER_SIZE, 0,(struct sockaddr *) &client_addr, &client_addr_len)) == -1) {
+                perror("Error in recvfrom");
+                exit(1);
+            }
+            if (strncmp(socket_buffer, "close", 5) == 0) {
+                    if(mode_param == 'o'){
+                        close(frwrd_fd);
+                    }
+                    close(sock_fd);
+                    unlink(socket_path);
+                    close(parent_to_child_pipe);
+                    close(child_to_parent_pipe);
+                    printf("Closing server.\n");
+                    exit(EXIT_SUCCESS);
+            } else{
+                socket_buffer[recv_len] = '\0';
+                write(parent_to_child_pipe, socket_buffer, strlen(socket_buffer)); // We have the input in the buffer and we need to feed it to the child process. This is the desired behavior across all modes.
+                memset(process_buffer, 0, BUFFER_SIZE); 
+                bytes_read = read(child_to_parent_pipe, process_buffer, sizeof(process_buffer) - 1);
+                if (bytes_read > 0) {
+                    process_buffer[bytes_read] = '\0'; // Null-terminate the string
+                    //No mode b in this..
+                    if(mode_param == 'i'){
+                        //Output goes to STDOUT
+                        printf("Child process responds to UDP Client: %s\n",process_buffer);
+                    }else if(mode_param == 'o'){
+                        //Output goes to ip add argument
+                        if(strcmp(frwrd_type,"TCPC") == 0){
+                            send(frwrd_fd,process_buffer,sizeof(process_buffer) - 1,0);
+                        }else if(strcmp(frwrd_type,"UDPC") == 0){
+                            sendto(frwrd_fd, process_buffer, sizeof(process_buffer) -1, 0, (struct sockaddr *)udp_frwrd_addr, udp_frwrd_addr_len);
+                        }else if(strcmp(frwrd_type,"UDSCD") == 0){
+                            sendto(frwrd_fd, process_buffer, sizeof(process_buffer) -1, 0, (struct sockaddr *)uds_frwrd_addr, uds_frwrd_addr_len);
+                        }else if(strcmp(frwrd_type,"UDSCS") == 0){
+                            send(frwrd_fd,process_buffer,strlen(process_buffer),0);
+                        }
+                    }
+                }
+                // Reset buffer
+                memset(socket_buffer, 0, BUFFER_SIZE); 
+                memset(process_buffer, 0, BUFFER_SIZE);
+
+            }
+        }
+
+    }
+
+    if(mode_param == 'o'){
+        close(frwrd_fd);
+    }
+    close(sock_fd);
+    unlink(socket_path);
 }
 
-void create_uds_stream_server(){
+//UDSSS
+void create_uds_stream_server(int e_param, char mode_param,int parent_to_child_pipe,int child_to_parent_pipe,int frwrd_fd,char *frwrd_type,struct sockaddr_in *udp_frwrd_addr,char *socket_path,struct sockaddr_un *uds_frwrd_addr){
+    if((mode_param == 'o' && frwrd_fd == -1)){
+        printf("Error setting up client.\n");
+        exit(EXIT_FAILURE);
+    }
+    int sock_fd,client_fd,max_fd;
+    struct sockaddr_un server_addr, client_addr;
+    char socket_buffer[BUFFER_SIZE];
+    char process_buffer[BUFFER_SIZE];
+    socklen_t client_addr_len = sizeof(struct sockaddr_un);
+    socklen_t udp_frwrd_addr_len = sizeof(*udp_frwrd_addr);
+    fd_set readfds;
+    ssize_t bytes_read,recv_len;
+    socklen_t uds_frwrd_addr_len = sizeof(*uds_frwrd_addr);
 
+    if ((sock_fd = socket(AF_UNIX, SOCK_STREAM, 0)) == -1) {
+        perror("socket");
+        exit(EXIT_FAILURE);
+    }
+
+
+    memset(&server_addr, 0, sizeof(struct sockaddr_un));
+    server_addr.sun_family = AF_UNIX;
+    strncpy(server_addr.sun_path, socket_path, sizeof(server_addr.sun_path) - 1);
+
+
+    // Bind socket to the path
+    if (bind(sock_fd, (struct sockaddr *) &server_addr, sizeof(struct sockaddr_un)) == -1) {
+        perror("bind");
+        close(sock_fd);
+        exit(EXIT_FAILURE);
+    }
+    printf("Started a UNIX Domain socket stream server at given path...\n");
+    if(listen(sock_fd,SOMAXCONN) == -1){
+        perror("listen");
+        close(sock_fd);
+        exit(EXIT_FAILURE);
+    }
+
+    if ((client_fd = accept(sock_fd, (struct sockaddr *)&client_addr, &client_addr_len)) == -1) {
+        perror("accept");
+        close(sock_fd);
+        exit(EXIT_FAILURE);
+    }
+    
+    while(1){
+        FD_ZERO(&readfds); //Clear fds to prepare for reading
+        FD_SET(STDIN_FILENO, &readfds); //Add STDIN to the set
+        FD_SET(client_fd, &readfds); // Add client fd to the set 
+        max_fd = client_fd > STDIN_FILENO ? (client_fd + 1) : (STDIN_FILENO + 1); // Determine the maximum of fds (select needs to know this?)
+
+        // select() waits for any fd activity  
+        if (select(max_fd, &readfds, NULL, NULL, NULL) < 0 && (errno != EINTR)) {
+            perror("Error on select");
+            close(sock_fd);
+            if(mode_param == 'o'){
+                close(frwrd_fd);
+            }
+            exit(EXIT_FAILURE);
+        }
+
+        
+        if(!e_param){ // Do if the parameter -e is missing:
+            // Check if something happened on stdin
+            if (FD_ISSET(STDIN_FILENO, &readfds)) {
+                memset(socket_buffer, 0, BUFFER_SIZE);
+                if (read(STDIN_FILENO, socket_buffer, BUFFER_SIZE) > 0) {
+                    if (strncmp(socket_buffer, "close", 5) == 0) {
+                        if(mode_param == 'o'){
+                            close(frwrd_fd);
+                        }
+                        close(sock_fd);
+                        unlink(socket_path);
+                        close(parent_to_child_pipe);
+                        close(child_to_parent_pipe);
+                        printf("Closing server.\n");
+                        exit(EXIT_SUCCESS);
+                    }
+                    write(parent_to_child_pipe, socket_buffer, strlen(socket_buffer)); // Send stdin input to child
+                    memset(process_buffer, 0, BUFFER_SIZE); 
+                    bytes_read = read(child_to_parent_pipe, process_buffer, sizeof(process_buffer) - 1);
+                    if (bytes_read > 0) {
+                        process_buffer[bytes_read] = '\0'; // Null-terminate the string
+                        printf("Child process responding to STDIN: %s\n",process_buffer); //Output goes to STDOUT
+                    }
+                    // Reset buffer
+                    memset(process_buffer, 0, BUFFER_SIZE); 
+                }
+            }
+        }
+    
+        // Check if something happened on client_fd
+        if(FD_ISSET(client_fd, &readfds)){
+            memset(socket_buffer, 0, BUFFER_SIZE);
+            // Continuously read each chunk of data from socket INTO the buffer
+            if((recv_len = recv(client_fd, socket_buffer, BUFFER_SIZE, 0)) == -1) {
+                perror("recv");
+                close(client_fd);
+                close(sock_fd);
+                unlink(socket_path);
+                exit(EXIT_SUCCESS);
+            }
+            if (strncmp(socket_buffer, "close", 5) == 0) {
+                    if(mode_param == 'o'){
+                        close(frwrd_fd);
+                    }
+                    close(sock_fd);
+                    unlink(socket_path);
+                    close(parent_to_child_pipe);
+                    close(child_to_parent_pipe);
+                    printf("Closing server.\n");
+                    exit(EXIT_SUCCESS);
+            } else{
+                socket_buffer[recv_len] = '\0';
+                write(parent_to_child_pipe, socket_buffer, strlen(socket_buffer)); // We have the input in the buffer and we need to feed it to the child process. This is the desired behavior across all modes.
+                memset(process_buffer, 0, BUFFER_SIZE); 
+                bytes_read = read(child_to_parent_pipe, process_buffer, sizeof(process_buffer) - 1);
+                if (bytes_read > 0) {
+                    process_buffer[bytes_read] = '\0'; // Null-terminate the string
+                    //No mode b in this..
+                    if(mode_param == 'b'){
+                        send(client_fd, process_buffer, strlen(process_buffer), 0);
+                    }else if(mode_param == 'i'){
+                        //Output goes to STDOUT
+                        printf("Child process responds to UDP Client: %s\n",process_buffer);
+                    }else if(mode_param == 'o'){
+                        //Output goes to ip add argument
+                        //If frwrd client is TCP...
+                        if(strcmp(frwrd_type,"TCPC") == 0){
+                            send(frwrd_fd,process_buffer,sizeof(process_buffer) - 1,0);
+                        }else if(strcmp(frwrd_type,"UDPC") == 0){
+                            sendto(frwrd_fd, process_buffer, sizeof(process_buffer) -1, 0, (struct sockaddr *)udp_frwrd_addr, udp_frwrd_addr_len);
+                        }else if(strcmp(frwrd_type,"UDSCD") == 0){
+                            sendto(frwrd_fd, process_buffer, sizeof(process_buffer) -1, 0, (struct sockaddr *)uds_frwrd_addr, uds_frwrd_addr_len);
+                        }else if(strcmp(frwrd_type,"UDSCS") == 0){
+                            send(frwrd_fd,process_buffer,strlen(process_buffer),0);
+                        }
+                    }
+                }
+                // Reset buffer
+                memset(socket_buffer, 0, BUFFER_SIZE); 
+                memset(process_buffer, 0, BUFFER_SIZE);
+
+            }
+        }
+
+    }
+
+    if(mode_param == 'o'){
+        close(frwrd_fd);
+    }
+    close(sock_fd);
+    unlink(socket_path);
 }
 
 //Clients
@@ -358,6 +659,43 @@ int create_udp_client(int frwrd_port,char *frwrd_ip,struct sockaddr_in *server_a
     return sock_fd;
 }
 
+int create_uds_datagram_client(char *socket_path,struct sockaddr_un *server_addr){
+    int sock_fd;
+    sock_fd = socket(AF_UNIX, SOCK_DGRAM, 0);
+    if (sock_fd == -1) {
+        perror("socket error");
+        return -1;
+    }
+    memset(server_addr, 0, sizeof(struct sockaddr_un));
+
+    server_addr->sun_family = AF_UNIX;
+    strncpy(server_addr->sun_path, socket_path, sizeof(server_addr->sun_path) - 1);
+
+    return sock_fd;
+}
+
+//UDSCS
+int create_uds_stream_client(char *socket_path){
+    int sockfd;
+    struct sockaddr_un addr;
+    sockfd = socket(AF_UNIX, SOCK_STREAM, 0);
+    if (sockfd == -1) {
+        perror("socket error");
+        return -1;
+    }
+
+    memset(&addr, 0, sizeof(struct sockaddr_un));
+    addr.sun_family = AF_UNIX;
+    strncpy(addr.sun_path, socket_path, sizeof(addr.sun_path) - 1);
+
+    if (connect(sockfd, (struct sockaddr*)&addr, sizeof(struct sockaddr_un)) == -1) {
+        perror("connect error");
+        close(sockfd);
+        return -1;
+    }
+    return sockfd;
+}
+
 
 int main(int argc, char *argv[]){
     char frwrd_type[6];
@@ -365,6 +703,7 @@ int main(int argc, char *argv[]){
     int frwrd_port;
     char server_type[6];
     int server_port;
+    char uds_path[100];
 
     char mode;
     int e_mode = 0;
@@ -422,16 +761,67 @@ int main(int argc, char *argv[]){
     //Assigning the correct modes
     if(b_string != NULL){
         mode = 'b';
-        extractTypeAndPort(b_string,server_type, &server_port);
+        //Supported Servers
+        if(strncmp(b_string,"UDPS",4) == 0){
+            strcpy(server_type,"UDPS");
+            sscanf(b_string, "%4d", &server_port);
+        }else if(strncmp(b_string,"TCPS",4) == 0){
+            strcpy(server_type,"TCPS");
+            sscanf(b_string, "%4d", &server_port);
+        }else if(strncmp(b_string,"UDSSD",5) == 0){
+            exit(EXIT_FAILURE); //UDSSD Doesn't support -b
+        }else if(strncmp(b_string,"UDSSS",5) == 0){
+            strcpy(server_type,"UDSSS");
+            sscanf(b_string, "UDSSS%s", uds_path);
+        }
+
     } else if (i_string != NULL && o_string == NULL){
         mode = 'i';
-        //Need to test if its UDP/TCP or unix domain socket
-        extractTypeAndPort(i_string,server_type, &server_port);
+        //Supported Servers
+        if(strncmp(i_string,"UDPS",4) == 0){
+            strcpy(server_type,"UDPS");
+            sscanf(i_string, "UDPS%d", &server_port);
+        }else if(strncmp(i_string,"TCPS",4) == 0){
+            strcpy(server_type,"TCPS");
+            sscanf(i_string, "TCPS%d", &server_port);
+        }else if(strncmp(i_string,"UDSSD",5) == 0){
+            strcpy(server_type,"UDSSD");
+            sscanf(i_string, "UDSSD%s", uds_path);
+        }else if(strncmp(i_string,"UDSSS",5) == 0){
+            strcpy(server_type,"UDSSS");
+            sscanf(i_string, "UDSSS%s", uds_path); 
+        }
+
     } else if (i_string != NULL && o_string != NULL){
         mode = 'o';
-        //Need to test if its UDP/TCP or unix domain socket
-        extractTypeAndPort(i_string,server_type, &server_port);
-        sscanf(o_string, "%4s%[^,],%d", frwrd_type, frwrd_ip, &frwrd_port);
+        //Supported Servers
+        if(strncmp(i_string,"UDPS",4) == 0){
+            strcpy(server_type,"UDPS");
+            sscanf(i_string, "UDPS%d", &server_port);
+        }else if(strncmp(i_string,"TCPS",4) == 0){
+            strcpy(server_type,"TCPS");
+            sscanf(i_string, "TCPS%d", &server_port);
+        }else if(strncmp(i_string,"UDSSD",5) == 0){
+            strcpy(server_type,"UDSSD");
+            sscanf(i_string, "UDSSD%s", uds_path);
+        }else if(strncmp(i_string,"UDSSS",5) == 0){
+            strcpy(server_type,"UDSSS");
+            sscanf(i_string, "UDSSS%s", uds_path);
+        }
+
+        //Supported forward clients
+        if(strncmp(o_string,"UDPC",4) == 0){
+            sscanf(o_string, "%4s%[^,],%d", frwrd_type, frwrd_ip, &frwrd_port);
+        }else if(strncmp(o_string,"TCPC",4) == 0){
+            sscanf(o_string, "%4s%[^,],%d", frwrd_type, frwrd_ip, &frwrd_port);
+        }else if(strncmp(o_string,"UDSCD",5) == 0){
+            strcpy(frwrd_type,"UDSCD");
+            sscanf(o_string, "UDSCD%s", uds_path);
+        }else if(strncmp(o_string,"UDSCS",5) == 0){
+            strcpy(frwrd_type,"UDSCS");
+            sscanf(o_string, "UDSCS%s", uds_path);
+        }
+
     }
 
     int parent_to_child_pipe[2];
@@ -454,22 +844,33 @@ int main(int argc, char *argv[]){
         
         int frwrd_fd = -1;
         struct sockaddr_in frwrd_addr; //for udp client
+        struct sockaddr_un uds_frwrd_addr;
         //Start client
         if(mode == 'o'){
-            if(strcmp(frwrd_type,"UDPC") ==0){
+            if(strcmp(frwrd_type,"UDPC") == 0){
                 frwrd_fd = create_udp_client(frwrd_port,frwrd_ip,&frwrd_addr);
             }else if(strcmp(frwrd_type,"TCPC") == 0){
                 frwrd_fd = create_tcp_client(frwrd_port,frwrd_ip);
+            }else if(strcmp(frwrd_type,"UDSCD") == 0){
+                frwrd_fd = create_uds_datagram_client(uds_path,&uds_frwrd_addr);
+            }else if(strcmp(frwrd_type,"UDSCS") == 0){
+                frwrd_fd = create_uds_stream_client(uds_path);
             }else{
                 printf("Incorrect server type.\n");
                 exit(EXIT_FAILURE);
             }
         }
         // Start Server
+        printf("SERVER_TYPE: %s\n",server_type);
         if(strcmp(server_type,"UDPS") == 0){
-            create_udp_server(e_mode,mode,server_port,parent_to_child_pipe[1],child_to_parent_pipe[0],frwrd_fd,frwrd_type,&frwrd_addr,t_count);
+            create_udp_server(e_mode,mode,server_port,parent_to_child_pipe[1],child_to_parent_pipe[0],frwrd_fd,frwrd_type,&frwrd_addr,t_count,&uds_frwrd_addr);
         }else if(strcmp(server_type,"TCPS") == 0){
-            create_tcp_server(e_mode,mode,server_port,parent_to_child_pipe[1],child_to_parent_pipe[0],frwrd_fd,frwrd_type,&frwrd_addr);
+            create_tcp_server(e_mode,mode,server_port,parent_to_child_pipe[1],child_to_parent_pipe[0],frwrd_fd,frwrd_type,&frwrd_addr,&uds_frwrd_addr);
+        }else if(strcmp(server_type,"UDSSD") == 0){
+            printf("PATH ARGUMENT: %s\n",uds_path);
+            create_uds_datagram_server(e_mode,mode,parent_to_child_pipe[1],child_to_parent_pipe[0],frwrd_fd,frwrd_type,&frwrd_addr,uds_path,&uds_frwrd_addr);
+        }else if(strcmp(server_type,"UDSSS") == 0){
+            create_uds_stream_server(e_mode,mode,parent_to_child_pipe[1],child_to_parent_pipe[0],frwrd_fd,frwrd_type,&frwrd_addr,uds_path,&uds_frwrd_addr);
         }else{
             printf("Incorrect server type.\n");
             exit(EXIT_FAILURE);
